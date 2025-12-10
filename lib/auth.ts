@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { User } from "./types";
-import { db } from "./database";
 
 interface AuthState {
   user: User | null;
@@ -19,74 +18,66 @@ export const useAuth = create<AuthState>((set) => ({
   initialize: async () => {
     try {
       set({ isLoading: true, error: null });
-      const { data: session, error: sessionError } = await db
-        .auth()
-        .getSession();
 
-      if (sessionError) throw sessionError;
+      // Call session API endpoint (server-side checks cookies)
+      const response = await fetch("/api/auth/session", {
+        credentials: "include", // Important: send cookies
+      });
 
-      if (session?.user) {
-        // Fetch user profile including role with retry mechanism
-        let retryCount = 0;
-        let profile = null;
+      if (!response.ok) {
+        set({ user: null, isLoading: false, error: null });
+        return;
+      }
 
-        while (retryCount < 3 && !profile) {
-          const { data, error: profileError } = await db
-            .profiles()
-            .getById(session.user.id);
+      const data = await response.json();
 
-          if (!profileError && data) {
-            profile = data;
-            break;
-          }
-
-          retryCount++;
-          if (retryCount < 3) {
-            await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before retry
-          }
-        }
-
-        if (profile) {
-          set({
-            user: {
-              id: session.user.id,
-              name: profile.full_name,
-              email: session.user.email!,
-              role: profile.role,
-              avatar:
-                profile.avatar_url ||
-                `https://api.dicebear.com/7.x/avatars/svg?seed=${session.user.email}`,
-            },
-            isLoading: false,
-            error: null,
-          });
-        } else {
-          // If profile is not found after retries, clear the session
-          await db.auth().signOut();
-          set({ user: null, isLoading: false, error: "Profile not found" });
-        }
+      if (data.user) {
+        set({
+          user: {
+            id: data.user.id,
+            name: data.user.full_name,
+            email: data.user.email,
+            role: data.user.role,
+            avatar:
+              data.user.avatar_url ||
+              `https://api.dicebear.com/7.x/avatars/svg?seed=${data.user.email}`,
+          },
+          isLoading: false,
+          error: null,
+        });
       } else {
         set({ user: null, isLoading: false, error: null });
       }
-    } catch (error: any) {
-      console.error("Error initializing auth:", error);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Error initializing auth:", message);
       set({
         user: null,
         isLoading: false,
-        error: error.message || "Failed to initialize authentication",
+        error: message || "Failed to initialize authentication",
       });
     }
   },
   signOut: async () => {
     try {
-      await db.auth().signOut();
+      // Call signout API endpoint
+      const response = await fetch("/api/auth/signout", {
+        method: "POST",
+        credentials: "include", // Important: send cookies
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to sign out");
+      }
+
       set({ user: null, isLoading: false, error: null });
-    } catch (error: any) {
-      console.error("Error signing out:", error);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Error signing out:", message);
       set({
         user: null,
         isLoading: false,
-        error: error.message || "Failed to sign out",
+        error: message || "Failed to sign out",
       });
     }
   },

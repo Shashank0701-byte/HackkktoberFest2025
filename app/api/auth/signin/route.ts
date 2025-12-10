@@ -1,79 +1,88 @@
 import { NextRequest, NextResponse } from "next/server";
-import { dbOperations, type AuthStrategy } from "@/lib/database/operations";
+import { getDatabaseAdapter, initializeDatabase } from "@/lib/database";
+import { SignInInput, SignInSchema } from "./signin.schema";
+import { captureApiException } from "@/lib/observability/sentry";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { email, password, strategy = "bearer" } = body;
 
-    // Validate required fields
-    if (!email || !password) {
+    // Validate input using Zod schema
+    const result = SignInSchema.safeParse(body);
+
+    if (!result.success) {
       return NextResponse.json(
-        { error: "Missing required fields" },
+        { errors: result.error.flatten().fieldErrors },
         { status: 400 }
       );
     }
 
-    // Validate strategy
-    if (!["bearer", "cookie"].includes(strategy)) {
-      return NextResponse.json(
-        { error: "Invalid authentication strategy" },
-        { status: 400 }
-      );
-    }
+    const { email, password } = result.data satisfies SignInInput;
 
-    // Sign in user
-    const { data, error } = await dbOperations.auth.signIn(
+    // Initialize database adapter
+    await initializeDatabase();
+    const db = getDatabaseAdapter();
+
+    // Sign in user - adapter returns session with tokens
+    const { data: session, error: signInError } = await db.auth.signIn(
       email,
-      password,
-      strategy as AuthStrategy
+      password
     );
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 401 });
+    if (signInError) {
+      return NextResponse.json(
+        { error: signInError.message },
+        { status: 401 }
+      );
     }
 
-    if (!data) {
-      return NextResponse.json({ error: "Failed to sign in" }, { status: 500 });
+    if (!session || !session.user) {
+      return NextResponse.json(
+        { error: "Failed to sign in" },
+        { status: 500 }
+      );
     }
 
-    const { user, token, refreshToken } = data;
+    // Fetch profile data
+    const { data: profile } = await db.profiles.getById(session.user.id);
 
     // Create response
     const response = NextResponse.json({
       message: "Signed in successfully",
       user: {
-        _id: user._id,
-        email: user.email,
-        full_name: user.full_name,
-        role: user.role,
-        avatar_url: user.avatar_url,
-        is_verified: user.is_verified,
+        id: session.user.id,
+        email: session.user.email,
+        full_name: profile?.full_name,
+        role: profile?.role,
+        avatar_url: profile?.avatar_url,
       },
-      token,
-      refreshToken,
     });
 
-    // Set cookie if using cookie strategy
-    if (strategy === "cookie") {
-      response.cookies.set("auth-token", token, {
+    // Set session cookies (httpOnly for security)
+    if (session.access_token) {
+      response.cookies.set("sb-access-token", session.access_token, {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
-        maxAge: 7 * 24 * 60 * 60, // 7 days
+        maxAge: 60 * 60 * 24 * 7, // 7 days
+        path: "/",
       });
+    }
 
-      response.cookies.set("refresh-token", refreshToken, {
+    if (session.refresh_token) {
+      response.cookies.set("sb-refresh-token", session.refresh_token, {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
-        maxAge: 30 * 24 * 60 * 60, // 30 days
+        maxAge: 60 * 60 * 24 * 30, // 30 days
+        path: "/",
       });
     }
 
     return response;
   } catch (error) {
     console.error("Signin error:", error);
+    captureApiException(error, request, { handler: "POST /api/auth/signin" });
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }

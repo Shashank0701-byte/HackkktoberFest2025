@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import { stripe } from '@/lib/stripe';
 import { NextResponse } from 'next/server';
 import { headers } from 'next/headers';
+import { captureApiException } from '@/lib/observability/sentry';
 
 export async function POST(req: Request) {
   try {
@@ -11,6 +12,9 @@ export async function POST(req: Request) {
     }
 
     const supabase = createClient();
+    if (!supabase) {
+      return NextResponse.json({ error: 'Supabase not configured' }, { status: 503 });
+    }
 
     const {
       data: { session },
@@ -44,7 +48,8 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ url: portalSession.url });
   } catch (error) {
-    console.log('Error:', error);
+    console.error('Create portal session error:', error);
+    captureApiException(error, req, { handler: 'POST /api/create-portal-session' });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
